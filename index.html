@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Ramp Inventory Manager</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://apis.google.com/js/api.js"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.3.1/jspdf.umd.min.js"></script>
+</head>
+<body onload="handleClientLoad()">
+    <h1>Ramp Inventory Manager</h1>
+    <div id="reader"></div>
+    <button id="scanButton">Start Scanning</button>
+    <button id="clearButton">Clear List</button>
+    <button id="createInvoiceButton">Create Invoice</button>
+    <button id="undoInvoiceButton">Undo Invoice</button>
+    <div id="result"></div>
+    <div id="scanned-count"></div>
+    <div id="scanned-list"></div>
+    <script src="script.js"></script>
+
+
+    
+    <script>
+        // Your client ID from the downloaded JSON file
+        const CLIENT_ID = '1048065093155-uvnqnlp4114hrodu0roerntmo9ptggqf.apps.googleusercontent.com';
+        // Your API key from the Google Cloud Console
+        const API_KEY = 'AIzaSyDrWIsoMoONad8DuVgD4Hrvrsb7Eu1eny0';
+        // Your Google Sheet ID
+        const SPREADSHEET_ID = '1XrZZe0drtW4ecdLfTjrLMhLhX6Ehyql9K-CzDMNcHEQ';
+
+        // Array of API discovery doc URLs for APIs used by the quickstart
+        const DISCOVERY_DOCS = ["https://sheets.googleapis.com/$discovery/rest?version=v4"];
+
+        // Authorization scopes required by the API
+        const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const scanButton = document.getElementById('scanButton');
+            const clearButton = document.getElementById('clearButton');
+            const createInvoiceButton = document.getElementById('createInvoiceButton');
+            const undoInvoiceButton = document.getElementById('undoInvoiceButton');
+            const resultDiv = document.getElementById('result');
+            const scannedListDiv = document.getElementById('scanned-list');
+            const scannedCountDiv = document.getElementById('scanned-count');
+            let html5QrCode;
+            let scannedItems = [];
+
+            scanButton.addEventListener('click', function() {
+                if (html5QrCode && html5QrCode.isScanning) {
+                    html5QrCode.stop().then(() => {
+                        scanButton.textContent = 'Start Scanning';
+                    }).catch(err => {
+                        console.error('Failed to stop scanning:', err);
+                    });
+                } else {
+                    html5QrCode = new Html5Qrcode("reader");
+                    html5QrCode.start(
+                        { facingMode: "environment" },
+                        {
+                            fps: 10,
+                            qrbox: { width: 250, height: 250 }
+                        },
+                        onScanSuccess,
+                        onScanFailure
+                    ).then(() => {
+                        scanButton.textContent = 'Stop Scanning';
+                    }).catch(err => {
+                        console.error('Failed to start scanning:', err);
+                        resultDiv.textContent = 'Failed to access camera. Please ensure camera permissions are granted.';
+                    });
+                }
+            });
+
+            clearButton.addEventListener('click', function() {
+                scannedItems = [];
+                updateScannedList();
+            });
+
+            createInvoiceButton.addEventListener('click', function() {
+                createInvoice();
+            });
+
+            undoInvoiceButton.addEventListener('click', function() {
+                undoInvoice();
+            });
+
+            function onScanSuccess(decodedText, decodedResult) {
+                console.log(`Scan result: ${decodedText}`, decodedResult);
+                processScannedData(decodedText);
+            }
+
+            function onScanFailure(error) {
+                console.warn(`QR code scanning failed = ${error}`);
+            }
+
+            function processScannedData(data) {
+                const itemId = data;
+                const [type, id] = itemId.split('-');
+                const length = type.includes('LD') ? '5' : type.substring(2); // Extract length from type for ramps
+
+                if (!scannedItems.some(item => item.id === itemId)) {
+                    const scannedItem = {
+                        id: itemId,
+                        type: type,
+                        length: length,
+                        timestamp: new Date().toLocaleString()
+                    };
+
+                    scannedItems.unshift(scannedItem);
+                    updateScannedList();
+                    updateGoogleSheet(scannedItem);
+                } else {
+                    console.log('Item already scanned:', itemId);
+                }
+
+                resultDiv.textContent = `Last scanned: ${itemId}`;
+            }
+
+            function updateScannedList() {
+                scannedListDiv.innerHTML = '<h3>Scanned Items</h3>';
+                if (scannedItems.length === 0) {
+                    scannedListDiv.innerHTML += '<p>No items scanned yet.</p>';
+                } else {
+                    const ul = document.createElement('ul');
+                    scannedItems.forEach(item => {
+                        const li = document.createElement('li');
+                        li.textContent = `${item.id} - ${item.length}ft - ${item.timestamp}`;
+                        ul.appendChild(li);
+                    });
+                    scannedListDiv.appendChild(ul);
+                }
+                scannedCountDiv.textContent = `Total scanned items: ${scannedItems.length}`;
+            }
+
+            function updateGoogleSheet(item) {
+                gapi.client.sheets.spreadsheets.values.append({
+                    spreadsheetId: SPREADSHEET_ID,
+                    range: 'Inventory!A:E',
+                    valueInputOption: 'USER_ENTERED',
+                    insertDataOption: 'INSERT_ROWS',
+                    resource: {
+                        values: [[item.id, item.type, item.length, 'Installed', '']]
+                    }
+                }).then((response) => {
+                    console.log('Google Sheet updated', response);
+                }, (reason) => {
+                    console.error('Error updating Google Sheet:', reason.result.error.message);
+                });
+            }
+
+            function createInvoice() {
+                const componentsUsed = scannedItems.map(item => item.id).join(', ');
+                const totalLength = scannedItems.reduce((sum, item) => sum + parseFloat(item.length), 0);
+                const totalInstallationCost = calculateTotalInstallationCost(scannedItems);
+                const totalMonthlyRate = calculateTotalMonthlyRate(scannedItems);
+                const invoiceId = `INV-${Date.now()}`;
+
+                const invoiceData = [
+                    new Date().toLocaleString(),
+                    invoiceId,
+                    'Installation Address Placeholder', // You can change this to the actual installation address
+                    componentsUsed,
+                    totalLength,
+                    totalInstallationCost,
+                    totalMonthlyRate,
+                    `https://invoice.url/${invoiceId}` // Placeholder for the invoice URL
+                ];
+
+                gapi.client.sheets.spreadsheets.values.append({
+                    spreadsheetId: SPREADSHEET_ID,
+                    range: 'Installations!A:H',
+                    valueInputOption: 'USER_ENTERED',
+                    insertDataOption: 'INSERT_ROWS',
+                    resource: {
+                        values: [invoiceData]
+                    }
+                }).then((response) => {
+                    console.log('Invoice created', response);
+                    alert('Invoice created successfully!');
+                    markComponentsAsUnavailable();
+                }, (reason) => {
+                    console.error('Error creating invoice:', reason.result.error.message);
+                });
+            }
+
+            function undoInvoice() {
+                // Logic to undo the last invoice
+                // For simplicity, let's assume we undo the last created invoice
+                // In a real application, you might want to select a specific invoice to undo
+
+                // Fetch the last invoice data
+                gapi.client.sheets.spreadsheets.values.get({
+                    spreadsheetId: SPREADSHEET_ID,
+                    range: 'Installations!A:H'
+                }).then((response) => {
+                    const rows = response.result.values;
+                    if (rows.length > 0) {
+                        const lastInvoice = rows[rows.length - 1];
+                        const componentsUsed = lastInvoice[3].split(', ');
+                        markComponentsAsAvailable(componentsUsed);
+
+                        // Delete the last invoice row
+                        gapi.client.sheets.spreadsheets.batchUpdate({
+                            spreadsheetId: SPREADSHEET_ID,
+                            resource: {
+                                requests: [{
+                                    deleteDimension: {
+                                        range: {
+                                            sheetId: 'Installations',
+                                            dimension: 'ROWS',
+                                            startIndex: rows.length - 1,
+                                            endIndex: rows.length
+                                        }
+                                    }
+                                }]
+                            }
+                        }).then((response) => {
+                            console.log('Invoice undone', response);
+                            alert('Last invoice undone successfully!');
+                        }, (reason) => {
+                            console.error('Error undoing invoice:', reason.result.error.message);
+                        });
+                    } else {
+                        alert('No invoices to undo.');
+                    }
+                });
+            }
+
+            function markComponentsAsUnavailable() {
+                scannedItems.forEach(item => {
+                    gapi.client.sheets.spreadsheets.values.update({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: `Inventory!A${item.rowNumber}:E${item.rowNumber}`,
+                        valueInputOption: 'USER_ENTERED',
+                        resource: {
+                            values: [[item.id, item.type, item.length, 'Unavailable', '']]
+                        }
+                    }).then((response) => {
+                        console.log('Component marked as unavailable', response);
+                    }, (reason) => {
+                        console.error('Error marking component as unavailable:', reason.result.error.message);
+                    });
+                });
+            }
+
+            function markComponentsAsAvailable(components) {
+                components.forEach(componentId => {
+                    const item = scannedItems.find(item => item.id === componentId);
+                    if (item) {
+                        gapi.client.sheets.spreadsheets.values.update({
+                            spreadsheetId: SPREADSHEET_ID,
+                            range: `Inventory!A${item.rowNumber}:E${item.rowNumber}`,
+                            valueInputOption: 'USER_ENTERED',
+                            resource: {
+                                values: [[item.id, item.type, item.length, 'Available', '']]
+                            }
+                        }).then((response) => {
+                            console.log('Component marked as available', response);
+                        }, (reason) => {
+                            console.error('Error marking component as available:', reason.result.error.message);
+                        });
+                    }
+                });
+            }
+
+            function calculateTotalInstallationCost(items) {
+                // Logic to calculate total installation cost
+                return items.reduce((sum, item) => sum + parseFloat(item.type === 'LD' ? 100 : item.type.substring(2) * 10), 0); // Example calculation
+            }
+
+            function calculateTotalMonthlyRate(items) {
+                // Logic to calculate total monthly rate
+                return items.reduce((sum, item) => sum + parseFloat(item.type === 'LD' ? 20 : item.type.substring(2) * 2), 0); // Example calculation
+            }
+
+            // Initial update of the scanned list
+            updateScannedList();
+        });
+
+        function initClient() {
+            gapi.client.init({
+                apiKey: API_KEY,
+                clientId: CLIENT_ID,
+                discoveryDocs: DISCOVERY_DOCS,
+                scope: SCOPES
+            }).then(function () {
+                // Listen for sign-in state changes.
+                gapi.auth2.getAuthInstance().isSignedIn.listen(updateSigninStatus);
+                // Handle the initial sign-in state.
+                updateSigninStatus(gapi.auth2.getAuthInstance().isSignedIn.get());
+            }, function(error) {
+                console.error('Error initializing Google Sheets API', error);
+            });
+        }
+
+        function updateSigninStatus(isSignedIn) {
+            if (isSignedIn) {
+                console.log('User is signed in to Google');
+            } else {
+                console.log('User is not signed in to Google');
+            }
+        }
+
+        function handleClientLoad() {
+            gapi.load('client:auth2', initClient);
+        }
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.3.1/jspdf.umd.min.js"></script>
+
+</body>
+</html>
